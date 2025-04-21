@@ -1,0 +1,10 @@
+[flake8]
+max-line-length = 120
+exclude =
+    # Ignorar archivos y directorios con patrones específicos
+	.env
+	/venv/
+	__pycache__/
+	*.pyc
+	*.pyo
+	.idea

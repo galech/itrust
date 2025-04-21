@@ -4,8 +4,9 @@ from datetime import datetime, timezone
 from tzlocal import get_localzone
 
 
-def convert_to_utc(dt: datetime) -> datetime:
-    return (dt if dt.tzinfo else dt.replace(tzinfo=get_localzone())).astimezone(timezone.utc)
+def convert_to_utc(dt: datetime, troncate_ms=False) -> datetime:
+    dt = (dt if dt.tzinfo else dt.replace(tzinfo=get_localzone())).astimezone(timezone.utc)
+    return dt.replace(microsecond=0) if troncate_ms else dt
 
 
 def clear_redis_by_prefix(redis_client, prefix):

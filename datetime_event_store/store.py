@@ -33,22 +33,22 @@ class DatetimeEventStore:
 
     def compute_event_score(self, event_id):
 
-        return (self.events_by_id[event_id]["at"], event_id)
+        return self.events_by_id[event_id]["at"], event_id
 
     def get_event(self, event_id: int):
         return Event(**{**self.events_by_id[event_id], "id": event_id})
 
-    def store_event(self, at: datetime, detail: str):
+    def store_event(self, at: datetime, data: str):
 
         event_id = self.gen_new_id()
         self.sorted_store[DatetimeEventScore(convert_to_utc(at), event_id)] = event_id
-        self.events_by_id[event_id] = {"at": convert_to_utc(at), "detail": detail}
+        self.events_by_id[event_id] = {"at": convert_to_utc(at), "data": data}
         return self.get_event(event_id)
 
-    def update_event(self, event_id: int, at: datetime = None, detail: str = None):
+    def update_event(self, event_id: int, at: datetime = None, data: str = None):
         old_score = self.compute_event_score(event_id)
         self.events_by_id[event_id].update({
-            **({} if detail is None else {"detail": detail}),
+            **({} if data is None else {"data": data}),
             **({} if at is None else {"at": convert_to_utc(at)})
         })
         new_score = self.compute_event_score(event_id)
@@ -73,22 +73,21 @@ class DatetimeEventStore:
             else:
                 start = self.raw_id_to_tuple(cursor)
 
-        events_ids = [store[1] for store in islice(
+        raw_events = islice(
             self.sorted_store.irange(start, end, inclusive=((not cursor) or desc, not (cursor and desc)), reverse=desc),
-            limit)]
+            limit)
         if limit:
             return {
-                "events": [self.get_event(event_id) for event_id in events_ids],
-                "next_cursor": events_ids[-1] if len(events_ids) == limit else None
+                "events": [self.get_event(store_event[1]) for store_event in raw_events],
+                "next_cursor": raw_events[-1] if len(raw_events) == limit else None
             }
 
-        return [self.get_event(event_id) for event_id in events_ids]
+        return [self.get_event(store_event[1]) for store_event in raw_events]
 
 
 class RedisDatetimeEventStore:
 
-    def __init__(self, redis_client, sorted_key="sorted_events", hash_prefix="event:", prefix="qqqqqqqqqqevents",
-                 max_digits=12):
+    def __init__(self, redis_client, sorted_key="sorted_events", hash_prefix="event:", prefix="qqqqqqqqqqevents"):
 
         self.redis = redis_client
         self.prefix = prefix
@@ -117,16 +116,17 @@ class RedisDatetimeEventStore:
         return self._timestamp_to_score(datetime.fromisoformat(self.redis.hgetall(self._hash_key(event_id))["at"]),
                                         event_id)
 
-    def _timestamp_to_score(self, dt: datetime, event_id: int):
+    @staticmethod
+    def _timestamp_to_score(dt: datetime, event_id: int):
         # we can only filter by seconds and we are limited to 999999 items
         return int(dt.timestamp()) + event_id * 1e-6
 
-    def store_event(self, at: datetime, detail: str):
+    def store_event(self, at: datetime, data: str):
 
         event_id = self.gen_new_id()
         pipe = self.redis.pipeline()
         pipe.zadd(self.sorted_key, {event_id: self._timestamp_to_score(convert_to_utc(at), event_id)})
-        pipe.hset(self._hash_key(event_id), mapping={"at": convert_to_utc(at).isoformat(), "detail": detail})
+        pipe.hset(self._hash_key(event_id), mapping={"at": convert_to_utc(at).isoformat(), "data": data})
         pipe.execute()
         return self.get_event(event_id)
 
@@ -136,12 +136,12 @@ class RedisDatetimeEventStore:
         pipe.delete(self._hash_key(event_id))
         pipe.execute()
 
-    def update_event(self, event_id: int, at: datetime = None, detail: str = None):
+    def update_event(self, event_id: int, at: datetime = None, data: str = None):
 
         pipe = self.redis.pipeline()
         old_score = self.compute_event_score(event_id)
         pipe.hset(self._hash_key(event_id), mapping={
-            **({} if detail is None else {"detail": detail}),
+            **({} if data is None else {"data": data}),
             **({} if at is None else {"at": convert_to_utc(at).isoformat()})
         })
         new_score = self.compute_event_score(event_id)
@@ -176,6 +176,8 @@ class RedisDatetimeEventStore:
 
 class MongoDBDatetimeEventStore:
 
+    # we lose microseconds precision
+
     def __init__(self, mongo_url: str, db_name: str, collection_name: str = "events"):
 
         self.client = AsyncIOMotorClient(mongo_url)
@@ -189,10 +191,12 @@ class MongoDBDatetimeEventStore:
 
         await self.collection.create_index([("at", DESCENDING), ("_id", DESCENDING)])
         await self.collection.create_index([("at", ASCENDING), ("_id", ASCENDING)])
+        await self.collection.create_index([("at", ASCENDING)])
+        await self.collection.create_index([("at", DESCENDING)])
 
-    async def store_event(self, at: datetime, detail: str):
+    async def store_event(self, at: datetime, data: str):
 
-        event = {"at": convert_to_utc(at), "detail": detail}
+        event = {"at": convert_to_utc(at, troncate_ms=True), "data": data}
         result = await self.collection.insert_one(event)
         return Event(**{**event, "id": str(result.inserted_id)})
 
@@ -200,61 +204,65 @@ class MongoDBDatetimeEventStore:
         doc = await self.collection.find_one({"_id": ObjectId(event_id)})
         return self.doc_to_event(doc)
 
-    async def update_event(self, event_id: str, at: Optional[datetime] = None, detail: Optional[str] = None):
+    async def update_event(self, event_id: str, at: Optional[datetime] = None, data: Optional[str] = None):
         await self.collection.update_one(
             {"_id": ObjectId(event_id)},
             {
                 "$set": {
-                    **({} if detail is None else {"detail": detail}),
-                    **({} if at is None else {"at": convert_to_utc(at)})
+                    **({} if data is None else {"data": data}),
+                    **({} if at is None else {"at": convert_to_utc(at, troncate_ms=True)})
                 }
             })
         return await self.get_event(event_id)
 
-    async def delete_event(self, event_id: int):
+    async def delete_event(self, event_id: str):
         await self.collection.delete_one({"_id": ObjectId(event_id)})
 
-    def doc_to_event(self, doc):
-        return Event(**{"id": str(doc["_id"]), "at": doc["at"].replace(tzinfo=timezone.utc), "detail": doc["detail"]})
+    @staticmethod
+    def doc_to_event(doc):
+        return Event(**{"id": str(doc["_id"]), "at": doc["at"].replace(tzinfo=timezone.utc), "data": doc["data"]})
 
-    def encode_cursor(self, event) -> str:
-        """Codificar el cursor en formato base64"""
+    @staticmethod
+    def encode_cursor(event) -> str:
         return base64.urlsafe_b64encode(
             json.dumps({"at": event["at"].isoformat(), "id": str(event["_id"])}).encode()).decode()
 
-    def decode_cursor(self, cursor: str):
-        """Decodificar el cursor de base64"""
+    @staticmethod
+    def decode_cursor(cursor: str):
         payload = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
         return datetime.fromisoformat(payload["at"]), ObjectId(payload["id"])
 
     async def get_events(self,
                          start_date: datetime = None,
                          end_date: datetime = None,
-                         cursor: int = None,
+                         cursor: str = None,
                          limit: int = None,
                          desc: bool = False,
                          ):
 
-        at_conditions = {}
         conditions = []
-        if start_date:
-            at_conditions["$gte"] = start_date
-        if end_date:
-            at_conditions["$lte"] = end_date
+        if start_date or end_date:
+            at_conditions = {}
+            if start_date:
+                at_conditions["$gte"] = start_date
+            if end_date:
+                at_conditions["$lte"] = end_date
+            conditions.append({"at": at_conditions})
 
         if cursor:
             ts, oid = self.decode_cursor(cursor)
-            at_conditions["$lte" if desc else "$gte"] = ts
-            conditions.append({"_id": {("$lt" if desc else "$gt"): oid}})
-
-        if at_conditions:
-            conditions.append({"at": at_conditions})
+            conditions.append({"$or": [
+                {"at": {"$lt": ts} if desc else {"$gt": ts}},
+                {
+                    "at": ts,
+                    "_id": {"$gt": oid}
+                }
+            ]})
 
         sort = DESCENDING if desc else ASCENDING
-
-        filters = {"$and": conditions} if conditions else {}
-        query = self.collection.find(filters).sort([("timestamp", sort), ("_id", sort)])
-
+        query = self.collection.find(
+            {"$and": conditions} if conditions else None
+        ).sort([("at", sort), ("_id", sort)])
         if limit:
             events = await query.limit(limit).to_list(length=limit)
             return {

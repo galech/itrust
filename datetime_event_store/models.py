@@ -10,7 +10,7 @@ DatetimeEventScore = namedtuple("DatetimeEventScore", ["timestamp", "id"])
 class Event(BaseModel):
     id: Union[str, int]
     at: datetime
-    detail: str
+    data: str
 
 
 class CursorPaginatedEvents(BaseModel):
