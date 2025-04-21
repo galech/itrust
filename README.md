@@ -13,6 +13,8 @@ It includes **three implementations** with the same interface:
 ## ✨ Features
 
 - Store events with an associated timestamp and string payload
+- All datetimes are stored and returned in UTC
+    - If a datetime without timezone is provided, it is assumed to be in local time and automatically converted to UTC
 - Query events in chronological order with cursor-based pagination
 - Update or delete events by ID
 - Filter by start and end datetimes
@@ -206,13 +208,9 @@ http://localhost:8000
 
 # 🛠️ Setup
 
-### 🚧 Setup in Progress
-
-The setup process is currently under construction, but we have provided the following manual setup steps to get the project up and running. We are working on providing a Docker setup soon for easier deployment.
-
 ### 🔥 Backend Setup
 
-1. **Start Redis and MongoDB containers** (or use your existing instances):
+1. (Optional) **Start Redis and MongoDB containers** (or use your existing instances):
    - Run Redis:
      ```bash
      docker run --name redis -p 6379:6379 -d redis
@@ -246,7 +244,7 @@ The setup process is currently under construction, but we have provided the foll
 4. **Set environment variables**:
    - Set the `ENGINE`, `GEN_TEST_DATA`, and `CLEAR_STORE` environment variables. For example, to use MongoDB and generate test data:
      ```bash
-     export ENGINE=mongo
+     export ENGINE=mongo (mongo, redis, or memory) 
      export GEN_TEST_DATA=true
      export CLEAR_STORE=true
      ```
@@ -280,9 +278,3 @@ The setup process is currently under construction, but we have provided the foll
      ```
 
 ---
-
-### 🚀 Expected Docker Support
-
-We are currently working on a Docker setup to simplify the configuration and setup of both the backend and frontend. Once completed, you'll be able to run the entire application using Docker.
-
-Stay tuned for updates!
