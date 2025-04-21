@@ -204,10 +204,6 @@ The frontend interacts with the FastAPI backend via HTTP requests to perform all
 http://localhost:8000
 ```
 
-# Event Store Project
-
-This project includes a backend built with **FastAPI**, offering a CRUD interface over events stored in either **MongoDB** or **Redis**. The frontend is a basic React application that interacts with the FastAPI backend to perform CRUD operations and displays the events in a table with lazy loading using cursor pagination.
-
 # 🛠️ Setup
 
 ### 🚧 Setup in Progress
