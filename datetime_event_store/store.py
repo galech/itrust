@@ -62,24 +62,34 @@ class DatetimeEventStore:
         del self.sorted_store[self.compute_event_score(event_id)]
         del self.events_by_id[event_id]
 
+    def encode_cursor(self, cursor: tuple):
+        return base64.urlsafe_b64encode(json.dumps(cursor).encode()).decode()
+
+    def decode_cursor(self, encoded: str):
+
+        cursor_date, cursor_id = tuple(json.loads(base64.urlsafe_b64decode(encoded).decode()))
+        return isoparse(cursor_date), cursor_id
+
     def get_events(self, start_date: datetime = None, end_date: datetime = None, cursor=None, limit=None, desc=False):
 
-        start = DatetimeEventScore(start_date.isoformat(), 0) if start_date else None
-        end = DatetimeEventScore(end_date.isoformat(), float('inf')) if end_date else None
+        start = DatetimeEventScore(convert_to_utc(start_date), 0) if start_date else None
+        end = DatetimeEventScore(convert_to_utc(end_date), float('inf')) if end_date else None
 
         if cursor:
             if desc:
-                end = self.raw_id_to_tuple(cursor)
+                end = self.decode_cursor(cursor)
             else:
-                start = self.raw_id_to_tuple(cursor)
+                start = self.decode_cursor(cursor)
 
-        raw_events = islice(
+        raw_events = list(islice(
             self.sorted_store.irange(start, end, inclusive=((not cursor) or desc, not (cursor and desc)), reverse=desc),
-            limit)
+            limit))
         if limit:
             return {
                 "events": [self.get_event(store_event[1]) for store_event in raw_events],
-                "next_cursor": raw_events[-1] if len(raw_events) == limit else None
+                "next_cursor": self.encode_cursor(
+                    (raw_events[-1][0].isoformat(), raw_events[-1][1])
+                ) if len(raw_events) == limit else None
             }
 
         return [self.get_event(store_event[1]) for store_event in raw_events]
@@ -87,7 +97,21 @@ class DatetimeEventStore:
 
 class RedisDatetimeEventStore:
 
-    def __init__(self, redis_client, sorted_key="sorted_events", hash_prefix="event:", prefix="qqqqqqqqqqevents"):
+    # We intentionally discard microseconds from the datetime to reserve the
+    # decimal part of the float score in the Redis ZSET.
+    # This allows us to encode a unique event identifier (e.g., event_id * 1e-6)
+    # into the score, ensuring total ordering even for events with the same second.
+    # As a trade-off, microsecond precision is lost.
+    truncate_microseconds = True
+
+    # In this implementation, we encode the event ID as a fractional part of the Redis ZSET score
+    # using `score = int(dt.timestamp()) + event_id * 1e-6`.
+    # This limits the number of events we can generate to 999,999,
+    # since only 6 decimal digits are available in the fractional part.
+    # Note: this limit applies to the total number of events created (not concurrently),
+    # and assumes event_id is an increasing integer less than 1,000,000.
+
+    def __init__(self, redis_client, sorted_key="sorted_events", hash_prefix="event:", prefix="events"):
 
         self.redis = redis_client
         self.prefix = prefix
@@ -125,8 +149,14 @@ class RedisDatetimeEventStore:
 
         event_id = self.gen_new_id()
         pipe = self.redis.pipeline()
-        pipe.zadd(self.sorted_key, {event_id: self._timestamp_to_score(convert_to_utc(at), event_id)})
-        pipe.hset(self._hash_key(event_id), mapping={"at": convert_to_utc(at).isoformat(), "data": data})
+        pipe.zadd(self.sorted_key, {event_id: self._timestamp_to_score(convert_to_utc(at, truncate_ms=True), event_id)})
+        pipe.hset(
+            self._hash_key(event_id),
+            mapping={
+                "at": convert_to_utc(
+                    at,
+                    truncate_ms=True).isoformat(),
+                "data": data})
         pipe.execute()
         return self.get_event(event_id)
 
@@ -142,7 +172,7 @@ class RedisDatetimeEventStore:
         old_score = self.compute_event_score(event_id)
         pipe.hset(self._hash_key(event_id), mapping={
             **({} if data is None else {"data": data}),
-            **({} if at is None else {"at": convert_to_utc(at).isoformat()})
+            **({} if at is None else {"at": convert_to_utc(at, truncate_ms=True).isoformat()})
         })
         new_score = self.compute_event_score(event_id)
         if old_score != new_score:
@@ -156,13 +186,13 @@ class RedisDatetimeEventStore:
                    desc=False):
 
         if desc:
-            max_score = cursor_score or (int(end_date.timestamp()) if end_date else "+inf")
+            max_score = cursor_score or (int(end_date.timestamp()) + 999999 * 1e-6 if end_date else "+inf")
             min_score = int(start_date.timestamp()) if start_date else "-inf"
             ids = self.redis.zrevrangebyscore(self.sorted_key, max_score, min_score, 0 if limit else None,
                                               limit or None)
         else:
             min_score = cursor_score or (int(start_date.timestamp()) if start_date else "-inf")
-            max_score = int(end_date.timestamp()) if end_date else "+inf"
+            max_score = int(end_date.timestamp()) + 999999 * 1e-6 if end_date else "+inf"
             ids = self.redis.zrangebyscore(self.sorted_key, min_score, max_score, 0 if limit else None, limit or None)
 
         if limit:
@@ -176,7 +206,11 @@ class RedisDatetimeEventStore:
 
 class MongoDBDatetimeEventStore:
 
-    # we lose microseconds precision
+    # Note: MongoDB only supports datetime precision up to milliseconds.
+    # Any microseconds in the datetime will be truncated or rounded when stored.
+    # It's recommended to normalize timestamps to milliseconds before saving,
+    # to avoid subtle inconsistencies.
+    truncate_microseconds = True
 
     def __init__(self, mongo_url: str, db_name: str, collection_name: str = "events"):
 
@@ -186,6 +220,7 @@ class MongoDBDatetimeEventStore:
     async def clear(self):
 
         await self.collection.drop()
+        await self.setup()
 
     async def setup(self):
 
@@ -195,8 +230,7 @@ class MongoDBDatetimeEventStore:
         await self.collection.create_index([("at", DESCENDING)])
 
     async def store_event(self, at: datetime, data: str):
-
-        event = {"at": convert_to_utc(at, troncate_ms=True), "data": data}
+        event = {"at": convert_to_utc(at, truncate_ms=True), "data": data}
         result = await self.collection.insert_one(event)
         return Event(**{**event, "id": str(result.inserted_id)})
 
@@ -210,7 +244,7 @@ class MongoDBDatetimeEventStore:
             {
                 "$set": {
                     **({} if data is None else {"data": data}),
-                    **({} if at is None else {"at": convert_to_utc(at, troncate_ms=True)})
+                    **({} if at is None else {"at": convert_to_utc(at, truncate_ms=True)})
                 }
             })
         return await self.get_event(event_id)

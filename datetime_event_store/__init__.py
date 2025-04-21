@@ -1,6 +1,6 @@
-from .models import CursorPaginatedEvents, Event
-from .store import DatetimeEventStore, Event, MongoDBDatetimeEventStore, RedisDatetimeEventStore
-from .utils import adapt_async
+from .models import CursorPaginatedEvents, Event  # noqa: F401
+from .store import DatetimeEventStore, MongoDBDatetimeEventStore, RedisDatetimeEventStore  # noqa: F401
+from .utils import adapt_async  # noqa: F401
 
 
 def genDatetimeEventStoreFromJson(json_data):
